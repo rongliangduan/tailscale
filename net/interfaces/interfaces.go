@@ -136,7 +136,7 @@ func (i Interface) IsLoopback() bool { return isLoopback(i.Interface) }
 func (i Interface) IsUp() bool       { return isUp(i.Interface) }
 
 // ForeachInterfaceAddress calls fn for each interface's address on the machine.
-func ForeachInterfaceAddress(fn func(Interface, netaddr.IP)) error {
+func ForeachInterfaceAddress(fn func(Interface, netaddr.IPPrefix)) error {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return err
@@ -150,8 +150,8 @@ func ForeachInterfaceAddress(fn func(Interface, netaddr.IP)) error {
 		for _, a := range addrs {
 			switch v := a.(type) {
 			case *net.IPNet:
-				if ip, ok := netaddr.FromStdIP(v.IP); ok {
-					fn(Interface{iface}, ip)
+				if pfx, ok := netaddr.FromStdIPNet(v); ok {
+					fn(Interface{iface}, pfx)
 				}
 			}
 		}
@@ -163,7 +163,7 @@ func ForeachInterfaceAddress(fn func(Interface, netaddr.IP)) error {
 // routing table, and other network configuration.
 // For now it's pretty basic.
 type State struct {
-	InterfaceIPs map[string][]netaddr.IP
+	InterfaceIPs map[string][]netaddr.IPPrefix
 	InterfaceUp  map[string]bool
 
 	// HaveV6Global is whether this machine has an IPv6 global address
@@ -216,14 +216,14 @@ func (s *State) String() string {
 		if s.InterfaceUp[ifName] {
 			fmt.Fprintf(&sb, "%s:[", ifName)
 			needSpace := false
-			for _, ip := range s.InterfaceIPs[ifName] {
-				if !isInterestingIP(ip) {
+			for _, pfx := range s.InterfaceIPs[ifName] {
+				if !isInterestingIP(pfx.IP) {
 					continue
 				}
 				if needSpace {
 					sb.WriteString(" ")
 				}
-				fmt.Fprintf(&sb, "%s", ip)
+				fmt.Fprintf(&sb, "%s", pfx)
 				needSpace = true
 			}
 			sb.WriteString("]")
@@ -283,16 +283,16 @@ var getPAC func() string
 // It does not set the returned State.IsExpensive. The caller can populate that.
 func GetState() (*State, error) {
 	s := &State{
-		InterfaceIPs: make(map[string][]netaddr.IP),
+		InterfaceIPs: make(map[string][]netaddr.IPPrefix),
 		InterfaceUp:  make(map[string]bool),
 	}
-	if err := ForeachInterfaceAddress(func(ni Interface, ip netaddr.IP) {
+	if err := ForeachInterfaceAddress(func(ni Interface, pfx netaddr.IPPrefix) {
 		ifUp := ni.IsUp()
-		s.InterfaceIPs[ni.Name] = append(s.InterfaceIPs[ni.Name], ip)
+		s.InterfaceIPs[ni.Name] = append(s.InterfaceIPs[ni.Name], pfx)
 		s.InterfaceUp[ni.Name] = ifUp
-		if ifUp && !ip.IsLoopback() && !ip.IsLinkLocalUnicast() && !isTailscaleInterfaceName(ni.Name) {
-			s.HaveV6Global = s.HaveV6Global || isGlobalV6(ip)
-			s.HaveV4 = s.HaveV4 || ip.Is4()
+		if ifUp && !pfx.IP.IsLoopback() && !pfx.IP.IsLinkLocalUnicast() && !isTailscaleInterfaceName(ni.Name) {
+			s.HaveV6Global = s.HaveV6Global || isGlobalV6(pfx.IP)
+			s.HaveV4 = s.HaveV4 || pfx.IP.Is4()
 		}
 	}); err != nil {
 		return nil, err
@@ -326,7 +326,8 @@ func HTTPOfListener(ln net.Listener) string {
 
 	var goodIP string
 	var privateIP string
-	ForeachInterfaceAddress(func(i Interface, ip netaddr.IP) {
+	ForeachInterfaceAddress(func(i Interface, pfx netaddr.IPPrefix) {
+		ip := pfx.IP
 		if isPrivateIP(ip) {
 			if privateIP == "" {
 				privateIP = ip.String()
@@ -362,7 +363,8 @@ func LikelyHomeRouterIP() (gateway, myIP netaddr.IP, ok bool) {
 	if !ok {
 		return
 	}
-	ForeachInterfaceAddress(func(i Interface, ip netaddr.IP) {
+	ForeachInterfaceAddress(func(i Interface, pfx netaddr.IPPrefix) {
+		ip := pfx.IP
 		if !i.IsUp() || ip.IsZero() || !myIP.IsZero() {
 			return
 		}
@@ -404,9 +406,9 @@ var (
 
 // anyInterestingIP reports ips contains any IP that matches
 // isInterestingIP.
-func anyInterestingIP(ips []netaddr.IP) bool {
-	for _, ip := range ips {
-		if isInterestingIP(ip) {
+func anyInterestingIP(pfxs []netaddr.IPPrefix) bool {
+	for _, pfx := range pfxs {
+		if isInterestingIP(pfx.IP) {
 			return true
 		}
 	}
