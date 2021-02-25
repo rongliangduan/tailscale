@@ -37,6 +37,7 @@ import (
 	"tailscale.com/derp"
 	"tailscale.com/derp/derphttp"
 	"tailscale.com/disco"
+	"tailscale.com/health"
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/logtail/backoff"
 	"tailscale.com/net/dnscache"
@@ -943,6 +944,7 @@ func (c *Conn) setNearestDERP(derpNum int) (wantDERP bool) {
 	defer c.mu.Unlock()
 	if !c.wantDerpLocked() {
 		c.myDerp = 0
+		health.SetMagicSockDERPHome(0)
 		return false
 	}
 	if derpNum == c.myDerp {
@@ -950,6 +952,7 @@ func (c *Conn) setNearestDERP(derpNum int) (wantDERP bool) {
 		return true
 	}
 	c.myDerp = derpNum
+	health.SetMagicSockDERPHome(derpNum)
 
 	if c.privateKey.IsZero() {
 		// No private key yet, so DERP connections won't come up anyway.
@@ -1407,10 +1410,14 @@ func (c *Conn) runDerpReader(ctx context.Context, derpFakeAddr netaddr.IPPort, d
 		return n
 	}
 
+	health.SetDERPRegionConnectedState(regionID, true)
+	defer health.SetDERPRegionConnectedState(regionID, false)
+
 	// peerPresent is the set of senders we know are present on this
 	// connection, based on messages we've received from the server.
 	peerPresent := map[key.Public]bool{}
 	bo := backoff.NewBackoff(fmt.Sprintf("derp-%d", regionID), c.logf, 5*time.Second)
+	var lastPacketTime time.Time
 	for {
 		msg, err := dc.Recv()
 		if err != nil {
@@ -1448,6 +1455,12 @@ func (c *Conn) runDerpReader(ctx context.Context, derpFakeAddr netaddr.IPPort, d
 			continue
 		}
 		bo.BackOff(ctx, nil) // reset
+
+		now := time.Now()
+		if lastPacketTime.IsZero() || now.Sub(lastPacketTime) > 5*time.Second {
+			health.NoteDERPRegionReceivedFrame(regionID)
+			lastPacketTime = now
+		}
 
 		switch m := msg.(type) {
 		case derp.ReceivedPacket:

@@ -527,7 +527,7 @@ func (c *Direct) sendMapRequest(ctx context.Context, maxPolls int, cb func(*netm
 		vlogf = c.logf
 	}
 
-	request := tailcfg.MapRequest{
+	request := &tailcfg.MapRequest{
 		Version:    tailcfg.CurrentMapRequestVersion,
 		KeepAlive:  c.keepAlive,
 		NodeKey:    tailcfg.NodeKey(persist.PrivateNodeKey.Public()),
@@ -595,6 +595,8 @@ func (c *Direct) sendMapRequest(ctx context.Context, maxPolls int, cb func(*netm
 			res.StatusCode, strings.TrimSpace(string(msg)))
 	}
 	defer res.Body.Close()
+
+	health.NoteMapRequestHeard(request)
 
 	if cb == nil {
 		io.Copy(ioutil.Discard, res.Body)
@@ -669,6 +671,9 @@ func (c *Direct) sendMapRequest(ctx context.Context, maxPolls int, cb func(*netm
 			return err
 		}
 
+		if allowStream {
+			health.GotStreamedMapResponse()
+		}
 		if resp.KeepAlive {
 			vlogf("netmap: got keep-alive")
 		} else {

@@ -8,13 +8,30 @@ package health
 
 import (
 	"sync"
+	"time"
+
+	"tailscale.com/tailcfg"
 )
 
 var (
-	mu       sync.Mutex
+	// mu guards everything in this var block.
+	mu sync.Mutex
+
 	m        = map[string]error{}                     // error key => err (or nil for no error)
 	watchers = map[*watchHandle]func(string, error){} // opt func to run if error state changes
+
+	inMapPoll               bool
+	inMapPollSince          time.Time
+	lastMapPollEndedAt      time.Time
+	lastStreamedMapResponse time.Time
 )
+
+func init() {
+	// TODO: use these. For staticcheck for now:
+	_ = inMapPollSince
+	_ = lastMapPollEndedAt
+	_ = lastStreamedMapResponse
+}
 
 type watchHandle byte
 
@@ -69,3 +86,49 @@ func set(key string, err error) {
 		go cb(key, err)
 	}
 }
+
+// GotStreamedMapResponse notes that we got a tailcfg.MapResponse
+// message in streaming mode, even if it's just a keep-alive message.
+func GotStreamedMapResponse() {
+	mu.Lock()
+	defer mu.Unlock()
+	lastStreamedMapResponse = time.Now()
+}
+
+// SetInPollNetMap records that we're in
+func SetInPollNetMap(v bool) {
+	mu.Lock()
+	defer mu.Unlock()
+	if v == inMapPoll {
+		return
+	}
+	inMapPoll = v
+	if v {
+		inMapPollSince = time.Now()
+	} else {
+		lastMapPollEndedAt = time.Now()
+	}
+}
+
+// SetMagicSockDERPHome notes that magicsock's view of its home DERP is.
+func SetMagicSockDERPHome(region int) {
+	// TODO
+}
+
+// NoteMapRequestHeard notes whenever we successfully sent a map request
+// to control for which we received a 200 response.
+func NoteMapRequestHeard(mr *tailcfg.MapRequest) {
+	// TODO: extract mr.HostInfo.NetInfo.PreferredDERP, compare
+	// against SetMagicSockDERPHome and
+	// SetDERPRegionConnectedState
+}
+
+func SetDERPRegionConnectedState(region int, connected bool) {
+	// TODO
+}
+
+func NoteDERPRegionReceivedFrame(region int) {
+	// TODO
+}
+
+// TODO: track ipn.State (Stopped, Starting, Running, etc)
