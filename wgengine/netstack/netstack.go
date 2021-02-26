@@ -16,6 +16,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"sync"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
@@ -34,6 +35,7 @@ import (
 	"tailscale.com/net/socks5"
 	"tailscale.com/types/logger"
 	"tailscale.com/types/netmap"
+	"tailscale.com/util/dnsname"
 	"tailscale.com/wgengine"
 	"tailscale.com/wgengine/filter"
 	"tailscale.com/wgengine/magicsock"
@@ -50,6 +52,9 @@ type Impl struct {
 	e       wgengine.Engine
 	mc      *magicsock.Conn
 	logf    logger.Logf
+
+	mu  sync.Mutex
+	dns map[string]netaddr.IP // Magic DNS names (both base + FQDN) => first IP
 }
 
 const nicID = 1
@@ -120,7 +125,33 @@ func (ns *Impl) Start() error {
 	return nil
 }
 
+func (ns *Impl) updateDNS(nm *netmap.NetworkMap) {
+	ns.mu.Lock()
+	defer ns.mu.Unlock()
+	ns.dns = make(map[string]netaddr.IP)
+	suffix := nm.MagicDNSSuffix()
+
+	if nm.Name != "" && len(nm.Addresses) > 0 {
+		ip := nm.Addresses[0].IP
+		ns.dns[strings.TrimRight(nm.Name, ".")] = ip
+		if dnsname.HasSuffix(nm.Name, suffix) {
+			ns.dns[dnsname.TrimSuffix(nm.Name, suffix)] = ip
+		}
+	}
+	for _, p := range nm.Peers {
+		if p.Name != "" && len(p.Addresses) > 0 {
+			ip := p.Addresses[0].IP
+			ns.dns[strings.TrimRight(p.Name, ".")] = ip
+			if dnsname.HasSuffix(p.Name, suffix) {
+				ns.dns[dnsname.TrimSuffix(p.Name, suffix)] = ip
+			}
+		}
+	}
+}
+
 func (ns *Impl) updateIPs(nm *netmap.NetworkMap) {
+	ns.updateDNS(nm)
+
 	oldIPs := make(map[tcpip.Address]bool)
 	for _, ip := range ns.ipstack.AllAddresses()[nicID] {
 		oldIPs[ip.AddressWithPrefix.Address] = true
@@ -294,6 +325,29 @@ func (ns *Impl) socks5Server() {
 	srv := &socks5.Server{
 		Logf: ns.logf,
 		Dialer: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			// If addr is for a hostname, resolve it,
+			// using either Magic DNS first or real system
+			// DNS.
+			if host, port, err := net.SplitHostPort(addr); err == nil && net.ParseIP(host) == nil {
+				ns.mu.Lock()
+				ip := ns.dns[host]
+				ns.mu.Unlock()
+				if ip.IsZero() {
+					// No Magic DNS name.
+					var r net.Resolver
+					ips, err := r.LookupIP(ctx, "ip", host)
+					if err != nil {
+						return nil, err
+					}
+					if len(ips) == 0 {
+						return nil, fmt.Errorf("DNS lookup returned no results for %q", host)
+					}
+					addr = net.JoinHostPort(ips[0].String(), port)
+				} else {
+					// Magic DNS had a match.
+					addr = net.JoinHostPort(ip.String(), port)
+				}
+			}
 			return ns.dialContextTCP(ctx, addr)
 		},
 	}
