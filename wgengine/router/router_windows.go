@@ -19,6 +19,7 @@ import (
 	"tailscale.com/logtail/backoff"
 	"tailscale.com/types/logger"
 	"tailscale.com/wgengine/router/dns"
+	"tailscale.com/wgengine/router/firewall"
 )
 
 type winRouter struct {
@@ -29,6 +30,7 @@ type winRouter struct {
 	routeChangeCallback *winipcfg.RouteChangeCallback
 	dns                 *dns.Manager
 	firewall            *firewallTweaker
+	wgFirewallEnabled   bool
 }
 
 func newUserspaceRouter(logf logger.Logf, wgdev *device.Device, tundev tun.Device) (Router, error) {
@@ -92,6 +94,46 @@ func (r *winRouter) Set(cfg *Config) error {
 
 	if err := r.dns.Set(cfg.DNS); err != nil {
 		return fmt.Errorf("dns set: %w", err)
+	}
+
+	// If default routes are being sent via Tailscale, we have to
+	// configure the Windows firewall to block outbound traffic
+	// through the "old" default route. Windows makes connections
+	// "sticky" to the default route and egress interface that was
+	// active when the connection was first established. So, if (say)
+	// Chrome has cached sockets that predate the Tailscale default
+	// route becoming active, those sockets will continue to use the
+	// older default route, bypassing Tailscale.
+	//
+	// To remedy this, when Tailscale has programmed a default route,
+	// we install firewall rules that block everything except
+	// Tailscale and a few core network services (DHCP, NDP, ARP) from
+	// using anything other than the Tailscale interface to dial
+	// out. This results in existing connections getting a prompt
+	// connection reset, and when they redial they'll use Tailscale as
+	// their default route.
+	//
+	// Privacy VPN services call this their "internet killswitch", and
+	// make a big deal of it from a privacy perspective. But it turns
+	// out that it's also a technical requirement to make default
+	// route switchover actually work!
+	hasdefault := false
+	for _, r := range cfg.Routes {
+		if r.Bits == 0 {
+			hasdefault = true
+			break
+		}
+	}
+	if hasdefault && !r.wgFirewallEnabled {
+		r.logf("enabling default route killswitch")
+		if err := firewall.EnableFirewall(r.nativeTun.LUID(), false, nil); err != nil {
+			r.logf("enabling default routing firewall failed: %v", err)
+		}
+		r.wgFirewallEnabled = true
+	} else if !hasdefault && r.wgFirewallEnabled {
+		r.logf("disabling default route killswitch")
+		firewall.DisableFirewall()
+		r.wgFirewallEnabled = false
 	}
 
 	return nil
